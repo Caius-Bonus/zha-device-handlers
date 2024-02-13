@@ -27,8 +27,7 @@ ZCL commands supported:
 Broken ZCL attributes:
     0x0204 - TemperatureDisplayMode (0x0000): Writing doesn't seem to do anything
 """
-
-
+from copy import copy
 from datetime import datetime
 from typing import Any, Callable, List
 
@@ -57,9 +56,9 @@ from zhaquirks.const import (
 )
 from zhaquirks.quirk_ids import DANFOSS_ALLY_THERMOSTAT
 
-occupied_heating_setpoint = Thermostat.AttributeDefs.occupied_heating_setpoint
-system_mode = Thermostat.AttributeDefs.system_mode
-min_heat_setpoint_limit = Thermostat.AttributeDefs.min_heat_setpoint_limit
+OCCUPIED_HEATING_SETPOINT = Thermostat.AttributeDefs.occupied_heating_setpoint
+SYSTEM_MODE = Thermostat.AttributeDefs.system_mode
+MIN_HEAT_SETPOINT_LIMIT = Thermostat.AttributeDefs.min_heat_setpoint_limit
 
 DANFOSS = "Danfoss"
 HIVE = DANFOSS
@@ -290,34 +289,41 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         preheat_time = ZCLAttributeDef(
             id=0x4050, type=types.uint32_t, access="rp", is_manufacturer_specific=True
         )
+        occupied_heating_setpoint_schedule = ZCLAttributeDef(
+            id=0x4052, type=types.int16s, access="rwp", is_manufacturer_specific=False
+        )
+
+    SETPOINT_SCHEDULE = AttributeDefs.occupied_heating_setpoint_schedule
 
     async def write_attributes(self, attributes, manufacturer=None):
         """There are 2 types of setpoint changes: Fast and Slow.
         Fast is used for immediate changes; this is done using a command (setpoint_command).
         Slow is used for scheduled changes; this is done using an attribute (occupied_heating_setpoint).
+        In case of a change on occupied_heating_setpoint, a setpoint_command is used.
 
-        system mode=off is not implemented on Danfoss; this is emulated by setting setpoint to the minimum setpoint.
-        In case of a change on occupied_heating_setpoint or system mode=off, a fast setpoint change is done.
+        Thermostatic radiator valves from Danfoss cannot be turned off to prevent damage during frost.
+        This is emulated by setting setpoint to the minimum setpoint.
         """
 
         fast_setpoint_change = None
 
-        if occupied_heating_setpoint.name in attributes:
-            # On Danfoss an immediate setpoint change is done through a command
-            # store for later in fast_setpoint_change and remove from attributes
-            fast_setpoint_change = attributes[occupied_heating_setpoint.name]
-
-        # if: system_mode = off
-        if attributes.get(system_mode.name) == system_mode.type.Off:
-            # Thermostatic Radiator Valves from Danfoss cannot be turned off to prevent damage during frost
+        if attributes.get(SYSTEM_MODE.name) == SYSTEM_MODE.type.Off:
             # just turn setpoint down to minimum temperature using fast_setpoint_change
-            fast_setpoint_change = self._attr_cache[min_heat_setpoint_limit.id]
-            attributes[occupied_heating_setpoint.name] = fast_setpoint_change
+            fast_setpoint_change = self._attr_cache[MIN_HEAT_SETPOINT_LIMIT.id]
+            attributes[OCCUPIED_HEATING_SETPOINT.name] = fast_setpoint_change
+            attributes[SYSTEM_MODE.name] = SYSTEM_MODE.type.Heat
 
-            # Danfoss doesn't accept off, therefore set to on
-            attributes[system_mode.name] = system_mode.type.Heat
+        if OCCUPIED_HEATING_SETPOINT.name in attributes:
+            # Store setpoint for use in command
+            fast_setpoint_change = attributes[OCCUPIED_HEATING_SETPOINT.name]
 
-        # attributes cannot be empty, because write_res cannot be empty, but it can contain unrequested items
+        if self.SETPOINT_SCHEDULE.name in attributes:
+            # handle setpoint schedule
+            attributes[OCCUPIED_HEATING_SETPOINT.name] = attributes.pop(
+                self.SETPOINT_SCHEDULE.name
+            )
+
+        # Attributes cannot be empty, because write_res cannot be empty, but it can contain unrequested items
         write_res = await super().write_attributes(
             attributes, manufacturer=manufacturer
         )
@@ -332,10 +338,30 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
         return write_res
 
+    async def read_attributes_raw(self, attributes, manufacturer=None):
+        """Handle setpoint schedule attribute."""
+        try:
+            attributes.remove(self.SETPOINT_SCHEDULE.id)
+            attributes.append(OCCUPIED_HEATING_SETPOINT.id)
+        except ValueError:  # if it doesn't exist: don't do anything
+            pass
+
+        results = await super().read_attributes_raw(
+            attributes, manufacturer=manufacturer
+        )
+
+        occupied_heating_setpoint_list = [
+            a for a in results[0] if a.attrid == OCCUPIED_HEATING_SETPOINT.id
+        ]
+        if occupied_heating_setpoint_list:
+            occupied_heating_setpoint_record = copy(occupied_heating_setpoint_list[0])
+            occupied_heating_setpoint_record.attrid = self.SETPOINT_SCHEDULE.id
+            results[0].append(occupied_heating_setpoint_record)
+
+        return results
+
     async def bind(self):
-        """According to the documentation of Zigbee2MQTT there is a bug in the Danfoss firmware with the time.
-        It doesn't request it, so it has to be fed the correct time.
-        """
+        """Danfoss doesn't request the time, but expects the controller to take the initiative of sending it."""
         await self.endpoint.time.write_time()
 
         return await super().bind()

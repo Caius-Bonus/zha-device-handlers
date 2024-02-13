@@ -336,6 +336,8 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
                 manufacturer=manufacturer,
             )
 
+        # TODO: also return setpoint_schedule when returned by OCCUPIED_HEATING_SETPOINT is write_res
+
         return write_res
 
     async def read_attributes_raw(self, attributes, manufacturer=None):

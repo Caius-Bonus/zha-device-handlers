@@ -348,6 +348,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         Fast is used for immediate changes; this is done using a command (setpoint_command).
         Slow is used for scheduled changes; this is done using an attribute (occupied_heating_setpoint).
         In case of a change on occupied_heating_setpoint, a setpoint_command is used.
+
         Thermostatic radiator valves from Danfoss cannot be turned off to prevent damage during frost.
         This is emulated by setting setpoint to the minimum setpoint.
         """
@@ -393,6 +394,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         It doesn't request it, so it has to be fed the correct time.
         """
         await self.endpoint.time.write_time()
+
         return await super().bind()
 
     async def read_attributes_raw(self, attributes, manufacturer=None):

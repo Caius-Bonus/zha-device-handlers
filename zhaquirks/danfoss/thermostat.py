@@ -230,6 +230,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
     class ServerCommandDefs(Thermostat.ServerCommandDefs):
         """Server Command Definitions."""
+
         setpoint_command = ZCLCommandDef(
             id=0x40,
             schema={
@@ -340,13 +341,13 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
     SETPOINT_SCHEDULE = AttributeDefs.occupied_heating_setpoint_schedule
 
+
     async def write_attributes(self, attributes, manufacturer=None):
         """There are 2 types of setpoint changes: Fast and Slow.
 
         Fast is used for immediate changes; this is done using a command (setpoint_command).
         Slow is used for scheduled changes; this is done using an attribute (occupied_heating_setpoint).
         In case of a change on occupied_heating_setpoint, a setpoint_command is used.
-
         Thermostatic radiator valves from Danfoss cannot be turned off to prevent damage during frost.
         This is emulated by setting setpoint to the minimum setpoint.
         """

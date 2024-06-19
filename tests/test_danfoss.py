@@ -1,9 +1,8 @@
-"""Tests the Danfoss quirk (all tests were written for the Popp eT093WRO)"""
+"""Tests the Danfoss quirk (all tests were written for the Popp eT093WRO)."""
 from unittest import mock
 
 from zigpy.quirks import CustomCluster
 from zigpy.zcl import foundation
-from zigpy.zcl.clusters.general import Time
 from zigpy.zcl.clusters.hvac import Thermostat
 from zigpy.zcl.foundation import WriteAttributesStatusRecord, ZCLAttributeDef
 
@@ -14,6 +13,7 @@ zhaquirks.setup()
 
 
 def test_popp_signature(assert_signature_matches_quirk):
+    """Test the signature matching the Device Class."""
     signature = {
         "node_descriptor": "NodeDescriptor(logical_type=<LogicalType.EndDevice: 2>, complex_descriptor_available=0, user_descriptor_available=0, reserved=0, aps_flags=0, frequency_band=<FrequencyBand.Freq2400MHz: 8>, mac_capability_flags=<MACCapabilityFlags.AllocateAddress: 128>, manufacturer_code=4678, maximum_buffer_size=82, maximum_incoming_transfer_size=82, server_mask=11264, maximum_outgoing_transfer_size=82, descriptor_capability_field=<DescriptorCapability.NONE: 0>, *allocate_address=True, *is_alternate_pan_coordinator=False, *is_coordinator=False, *is_end_device=True, *is_full_function_device=False, *is_mains_powered=False, *is_receiver_on_when_idle=False, *is_router=False, *is_security_capable=False)",
         # SizePrefixedSimpleDescriptor(endpoint=1, profile=260, device_type=769, device_version=1, input_clusters=[0, 1, 3, 10, 32, 513, 516, 2821], output_clusters=[0, 25])
@@ -44,20 +44,20 @@ def test_popp_signature(assert_signature_matches_quirk):
     )
 
 
+@mock.patch("zigpy.zcl.Cluster.bind", mock.AsyncMock())
 async def test_danfoss_time_bind(zigpy_device_from_quirk):
+    """Test the time being set when binding the Time cluster."""
     device = zigpy_device_from_quirk(zhaquirks.danfoss.thermostat.DanfossThermostat)
 
-    danfoss_time_cluster = device.endpoints[1].in_clusters[Time.cluster_id]
+    danfoss_time_cluster = device.endpoints[1].time
+    danfoss_thermostat_cluster = device.endpoints[1].thermostat
 
     def mock_write(attributes, manufacturer=None):
         records = [
             WriteAttributesStatusRecord(foundation.Status.SUCCESS)
-            for attr in attributes
+            for _ in attributes
         ]
         return [records, []]
-
-    def mock_wildcard(*args, **kwargs):
-        return
 
     patch_danfoss_trv_write = mock.patch.object(
         danfoss_time_cluster,
@@ -65,30 +65,24 @@ async def test_danfoss_time_bind(zigpy_device_from_quirk):
         mock.AsyncMock(side_effect=mock_write),
     )
 
-    patch_danfoss_trv_bind = mock.patch.object(
-        Time,
-        "bind",
-        mock.AsyncMock(side_effect=mock_wildcard),
-    )
+    with patch_danfoss_trv_write:
+        await danfoss_thermostat_cluster.bind()
 
-    with patch_danfoss_trv_bind:
-        with patch_danfoss_trv_write:
-            await danfoss_time_cluster.bind()
-
-            assert 0x0000 in danfoss_time_cluster._attr_cache
-            assert 0x0001 in danfoss_time_cluster._attr_cache
-            assert 0x0002 in danfoss_time_cluster._attr_cache
+        assert 0x0000 in danfoss_time_cluster._attr_cache
+        assert 0x0001 in danfoss_time_cluster._attr_cache
+        assert 0x0002 in danfoss_time_cluster._attr_cache
 
 
 async def test_danfoss_thermostat_write_attributes(zigpy_device_from_quirk):
+    """Test the Thermostat writes behaving correctly, in particular regarding setpoint."""
     device = zigpy_device_from_quirk(zhaquirks.danfoss.thermostat.DanfossThermostat)
 
-    danfoss_thermostat_cluster = device.endpoints[1].in_clusters[Thermostat.cluster_id]
+    danfoss_thermostat_cluster = device.endpoints[1].thermostat
 
     def mock_write(attributes, manufacturer=None):
         records = [
             WriteAttributesStatusRecord(foundation.Status.SUCCESS)
-            for attr in attributes
+            for _ in attributes
         ]
         return [records, []]
 
@@ -151,6 +145,10 @@ async def test_danfoss_thermostat_write_attributes(zigpy_device_from_quirk):
 
 
 async def test_customized_standardcluster(zigpy_device_from_quirk):
+    """Test customized standard cluster class correctly separating zigbee operations.
+
+    This is regarding manufacturer specific attributes.
+    """
     device = zigpy_device_from_quirk(zhaquirks.danfoss.thermostat.DanfossThermostat)
 
     danfoss_thermostat_cluster = device.endpoints[1].in_clusters[Thermostat.cluster_id]
@@ -206,7 +204,7 @@ async def test_customized_standardcluster(zigpy_device_from_quirk):
         if mock_attributes[attrs[0]].is_manufacturer_specific:
             reports = attrs
 
-        return [[545], [4545]]
+        return [[545]]
 
     # data is written to trv
     patch_danfoss_read_attributes = mock.patch.object(
@@ -216,5 +214,26 @@ async def test_customized_standardcluster(zigpy_device_from_quirk):
     )
 
     with patch_danfoss_read_attributes:
-        await danfoss_thermostat_cluster._read_attributes([56454, 656])
+        result = await danfoss_thermostat_cluster._read_attributes([56454, 656])
+        assert result
+        assert reports == [656]
+
+    def mock_read_attributes_fail(attrs, *args, **kwargs):
+        nonlocal reports
+        if mock_attributes[attrs[0]].is_manufacturer_specific:
+            reports = attrs
+
+        return [[545], [4545]]
+
+    # data is written to trv
+    patch_danfoss_read_attributes_fail = mock.patch.object(
+        CustomCluster,
+        "_read_attributes",
+        mock.AsyncMock(side_effect=mock_read_attributes_fail),
+    )
+
+    with patch_danfoss_read_attributes_fail:
+        result, fail = await danfoss_thermostat_cluster._read_attributes([56454, 656])
+        assert result
+        assert fail
         assert reports == [656]

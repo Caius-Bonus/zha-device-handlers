@@ -27,9 +27,10 @@ ZCL commands supported:
 Broken ZCL attributes:
     0x0204 - TemperatureDisplayMode (0x0000): Writing doesn't seem to do anything
 """
-from copy import copy
-from datetime import datetime
-from typing import Any, Callable, List
+from collections.abc import Callable
+from datetime import UTC, datetime
+import time
+from typing import Any
 
 from zigpy import types
 from zigpy.profiles import zha
@@ -56,13 +57,13 @@ from zhaquirks.const import (
 )
 from zhaquirks.quirk_ids import DANFOSS_ALLY_THERMOSTAT
 
-OCCUPIED_HEATING_SETPOINT = Thermostat.AttributeDefs.occupied_heating_setpoint
-SYSTEM_MODE = Thermostat.AttributeDefs.system_mode
-MIN_HEAT_SETPOINT_LIMIT = Thermostat.AttributeDefs.min_heat_setpoint_limit
-
 DANFOSS = "Danfoss"
 HIVE = DANFOSS
 POPP = "D5X84YU"
+
+occupied_heating_setpoint = Thermostat.AttributeDefs.occupied_heating_setpoint
+system_mode = Thermostat.AttributeDefs.system_mode
+min_heat_setpoint_limit = Thermostat.AttributeDefs.min_heat_setpoint_limit
 
 
 class DanfossViewingDirectionEnum(types.enum8):
@@ -75,7 +76,7 @@ class DanfossViewingDirectionEnum(types.enum8):
 class DanfossAdaptationRunControlEnum(types.enum8):
     """Initiate or Cancel adaptation run."""
 
-    Nothing = 0x00
+    Nothing = 0x00  # not documented in all documentation, but in some places and seems to work
     Initiate = 0x01
     Cancel = 0x02
 
@@ -90,6 +91,7 @@ class DanfossExerciseDayOfTheWeekEnum(types.enum8):
     Thursday = 4
     Friday = 5
     Saturday = 6
+    Undefined = 7
 
 
 class DanfossOpenWindowDetectionEnum(types.enum8):
@@ -102,16 +104,53 @@ class DanfossOpenWindowDetectionEnum(types.enum8):
     External = 0x04
 
 
+class DanfossSoftwareErrorCodeBitmap(types.bitmap16):
+    """Danfoss software error code bitmap."""
+
+    Top_pcb_sensor_error = 0x0001
+    Side_pcb_sensor_error = 0x0002
+    Non_volatile_memory_error = 0x0004
+    Unknown_hw_error = 0x0008
+    # 0x0010 = N/A
+    Motor_error = 0x0020
+    # 0x0040 = N/A
+    Invalid_internal_communication = 0x0080
+    # 0x0100 = N/A
+    Invalid_clock_information = 0x0200
+    # 0x0400 = N/A
+    Radio_communication_error = 0x0800
+    Encoder_jammed = 0x1000
+    Low_battery = 0x2000
+    Critical_low_battery = 0x4000
+    # 0x8000 = Reserved
+
+
+class DanfossAdaptationRunStatusBitmap(types.bitmap8):
+    """Danfoss Adaptation run status bitmap."""
+
+    In_progress = 0x0001
+    Valve_characteristic_found = 0x0002
+    Valve_characteristic_lost = 0x0004
+
+
+class DanfossAdaptationRunSettingsBitmap(types.bitmap8):
+    """Danfoss Adaptation run settings bitmap."""
+
+    Disabled = 0x00  # Undocumented, but seems to work
+    Enabled = 0x01
+
+
 class DanfossSetpointCommandEnum(types.enum8):
     """Set behaviour to change the setpoint."""
 
     Schedule = 0  # relatively slow
-    User_Interaction = 1  # aggressive change
+    User_interaction = 1  # aggressive change
     Preheat = 2  # invisible to user
 
 
 class DanfossPreheatCommandEnum(types.enum8):
     """Set behaviour of preheat command.
+
     Only one option available, but other values are possible in the future.
     """
 
@@ -128,6 +167,7 @@ class CustomizedStandardCluster(CustomCluster):
 
     @staticmethod
     def combine_results(*result_lists):
+        """Combine results from 1 or more result lists from zigbee commands."""
         success_global = []
         failure_global = []
         for result in result_lists:
@@ -136,19 +176,15 @@ class CustomizedStandardCluster(CustomCluster):
             elif len(result) == 2:
                 success_global.extend(result[0])
                 failure_global.extend(result[1])
-            else:
-                raise Exception(f"Unexpected result size: {len(result)}")
 
         if failure_global:
-            response = [success_global, failure_global]
+            return [success_global, failure_global]
         else:
-            response = [success_global]
-
-        return response
+            return [success_global]
 
     async def split_command(
         self,
-        records: List[Any],
+        records: list[Any],
         func: Callable,
         extract_attrid: Callable[[Any], int],
         *args,
@@ -166,19 +202,15 @@ class CustomizedStandardCluster(CustomCluster):
             if not self.attributes[extract_attrid(e)].is_manufacturer_specific
         ]
 
-        result_specific = []
-        result_standard = []
+        result_specific = (
+            await func(records_specific, *args, **kwargs) if records_specific else []
+        )
 
-        if records_specific:
-            result_specific = await func(records_specific, *args, **kwargs)
+        result_standard = (
+            await func(records_standard, *args, **kwargs) if records_standard else []
+        )
 
-        if records_standard:
-            result_standard = await func(records_standard, *args, **kwargs)
-
-        if result_specific and result_standard:
-            return self.combine_results(result_specific, result_standard)
-        else:
-            return result_standard if result_standard else result_specific
+        return self.combine_results(result_specific, result_standard)
 
     async def _configure_reporting(self, records, *args, **kwargs):
         """Configure reporting ZCL foundation command."""
@@ -197,6 +229,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
     """Danfoss cluster for standard and proprietary danfoss attributes."""
 
     class ServerCommandDefs(Thermostat.ServerCommandDefs):
+        """Server Command Definitions."""
         setpoint_command = ZCLCommandDef(
             id=0x40,
             schema={
@@ -206,7 +239,6 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
             is_manufacturer_specific=True,
         )
 
-        # for synchronizing multiple TRVs preheating
         preheat_command = ZCLCommandDef(
             id=0x42,
             schema={"force": DanfossPreheatCommandEnum, "timestamp": types.uint32_t},
@@ -214,7 +246,9 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         )
 
     class AttributeDefs(Thermostat.AttributeDefs):
-        open_window_detection = ZCLAttributeDef(
+        """Attribute Definitions."""
+
+        open_window_detection = ZCLAttributeDef(  # etrv_open_window_detection
             id=0x4000,
             type=DanfossOpenWindowDetectionEnum,
             access="rp",
@@ -222,9 +256,6 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         )
         external_open_window_detected = ZCLAttributeDef(
             id=0x4003, type=types.Bool, access="rw", is_manufacturer_specific=True
-        )  # non-configurable reporting
-        window_open_feature = ZCLAttributeDef(
-            id=0x4051, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
         exercise_day_of_week = ZCLAttributeDef(
             id=0x4010,
@@ -241,7 +272,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         mounting_mode_control = ZCLAttributeDef(
             id=0x4013, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
-        orientation = ZCLAttributeDef(  # Horizontal = False and Vertical = True
+        orientation = ZCLAttributeDef(  # etrv_orientation (Horizontal = False and Vertical = True)
             id=0x4014, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
         external_measured_room_sensor = ZCLAttributeDef(
@@ -250,24 +281,29 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         radiator_covered = ZCLAttributeDef(
             id=0x4016, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
+        control_algorithm_scale_factor = (
+            ZCLAttributeDef(  # values in [0x01, 0x0A] and disabled by 0x1X
+                id=0x4020,
+                type=types.uint8_t,
+                access="rw",
+                is_manufacturer_specific=True,
+            )
+        )  # non-configurable reporting
         heat_available = ZCLAttributeDef(
             id=0x4030, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
-        heat_required = ZCLAttributeDef(
+        heat_required = ZCLAttributeDef(  # heat_supply_request
             id=0x4031, type=types.Bool, access="rp", is_manufacturer_specific=True
         )
         load_balancing_enable = ZCLAttributeDef(
             id=0x4032, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
-        load_room_mean = ZCLAttributeDef(
+        load_room_mean = ZCLAttributeDef(  # load_radiator_room_mean
             id=0x4040, type=types.int16s, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting (according to the documentation, you cannot read it, but it works anyway)
-        load_estimate = ZCLAttributeDef(
+        load_estimate = ZCLAttributeDef(  # load_estimate_on_this_radiator
             id=0x404A, type=types.int16s, access="rp", is_manufacturer_specific=True
         )
-        control_algorithm_scale_factor = ZCLAttributeDef(
-            id=0x4020, type=types.uint8_t, access="rw", is_manufacturer_specific=True
-        )  # non-configurable reporting
         regulation_setpoint_offset = ZCLAttributeDef(
             id=0x404B, type=types.int8s, access="rw", is_manufacturer_specific=True
         )
@@ -278,10 +314,16 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
             is_manufacturer_specific=True,
         )  # non-configurable reporting
         adaptation_run_status = ZCLAttributeDef(
-            id=0x404D, type=types.bitmap8, access="rp", is_manufacturer_specific=True
+            id=0x404D,
+            type=DanfossAdaptationRunStatusBitmap,
+            access="rp",
+            is_manufacturer_specific=True,
         )
         adaptation_run_settings = ZCLAttributeDef(
-            id=0x404E, type=types.bitmap8, access="rw", is_manufacturer_specific=True
+            id=0x404E,
+            type=DanfossAdaptationRunSettingsBitmap,
+            access="rw",
+            is_manufacturer_specific=True,
         )
         preheat_status = ZCLAttributeDef(
             id=0x404F, type=types.Bool, access="rp", is_manufacturer_specific=True
@@ -289,6 +331,9 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         preheat_time = ZCLAttributeDef(
             id=0x4050, type=types.uint32_t, access="rp", is_manufacturer_specific=True
         )
+        window_open_feature = ZCLAttributeDef(  # window_open_feature_on_off
+            id=0x4051, type=types.Bool, access="rw", is_manufacturer_specific=True
+        )  # non-configurable reporting
         occupied_heating_setpoint_schedule = ZCLAttributeDef(
             id=0x4052, type=types.int16s, access="rwp", is_manufacturer_specific=False
         )
@@ -297,6 +342,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
     async def write_attributes(self, attributes, manufacturer=None):
         """There are 2 types of setpoint changes: Fast and Slow.
+
         Fast is used for immediate changes; this is done using a command (setpoint_command).
         Slow is used for scheduled changes; this is done using an attribute (occupied_heating_setpoint).
         In case of a change on occupied_heating_setpoint, a setpoint_command is used.
@@ -307,15 +353,15 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
         fast_setpoint_change = None
 
-        if attributes.get(SYSTEM_MODE.name) == SYSTEM_MODE.type.Off:
-            # just turn setpoint down to minimum temperature using fast_setpoint_change
-            fast_setpoint_change = self._attr_cache[MIN_HEAT_SETPOINT_LIMIT.id]
-            attributes[OCCUPIED_HEATING_SETPOINT.name] = fast_setpoint_change
-            attributes[SYSTEM_MODE.name] = SYSTEM_MODE.type.Heat
-
-        if OCCUPIED_HEATING_SETPOINT.name in attributes:
+        if occupied_heating_setpoint.name in attributes:
             # Store setpoint for use in command
-            fast_setpoint_change = attributes[OCCUPIED_HEATING_SETPOINT.name]
+            fast_setpoint_change = attributes[occupied_heating_setpoint.name]
+
+        if attributes.get(system_mode.name) == system_mode.type.Off:
+            # Just turn setpoint down to minimum temperature using fast_setpoint_change
+            fast_setpoint_change = self._attr_cache[min_heat_setpoint_limit.id]
+            attributes[occupied_heating_setpoint.name] = fast_setpoint_change
+            attributes[system_mode.name] = system_mode.type.Heat
 
         if self.SETPOINT_SCHEDULE.name in attributes:
             # handle setpoint schedule
@@ -331,7 +377,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         if fast_setpoint_change is not None:
             # On Danfoss a fast setpoint change is done through a command
             await self.setpoint_command(
-                DanfossSetpointCommandEnum.User_Interaction,
+                DanfossSetpointCommandEnum.User_interaction,
                 fast_setpoint_change,
                 manufacturer=manufacturer,
             )
@@ -339,6 +385,14 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         # TODO: also return setpoint_schedule when returned by OCCUPIED_HEATING_SETPOINT is write_res
 
         return write_res
+
+    async def bind(self):
+        """According to the documentation of Zigbee2MQTT there is a bug in the Danfoss firmware with the time.
+
+        It doesn't request it, so it has to be fed the correct time.
+        """
+        await self.endpoint.time.write_time()
+        return await super().bind()
 
     async def read_attributes_raw(self, attributes, manufacturer=None):
         """Handle setpoint schedule attribute."""
@@ -362,17 +416,13 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
 
         return results
 
-    async def bind(self):
-        """Danfoss doesn't request the time, but expects the controller to take the initiative of sending it."""
-        await self.endpoint.time.write_time()
-
-        return await super().bind()
-
 
 class DanfossUserInterfaceCluster(CustomizedStandardCluster, UserInterface):
     """Danfoss cluster for standard and proprietary danfoss attributes."""
 
     class AttributeDefs(UserInterface.AttributeDefs):
+        """Attribute Definitions."""
+
         viewing_direction = ZCLAttributeDef(
             id=0x4000,
             type=DanfossViewingDirectionEnum,
@@ -385,8 +435,13 @@ class DanfossDiagnosticCluster(CustomizedStandardCluster, Diagnostic):
     """Danfoss cluster for standard and proprietary danfoss attributes."""
 
     class AttributeDefs(Diagnostic.AttributeDefs):
+        """Attribute Definitions."""
+
         sw_error_code = ZCLAttributeDef(
-            id=0x4000, type=types.bitmap16, access="rpw", is_manufacturer_specific=True
+            id=0x4000,
+            type=DanfossSoftwareErrorCodeBitmap,
+            access="rpw",
+            is_manufacturer_specific=True,
         )
         wake_time_avg = ZCLAttributeDef(
             id=0x4001, type=types.uint32_t, access="r", is_manufacturer_specific=True
@@ -431,29 +486,29 @@ class DanfossTimeCluster(CustomizedStandardCluster, Time):
     """Danfoss cluster for fixing the time."""
 
     async def write_time(self):
-        epoch = datetime(2000, 1, 1, 0, 0, 0, 0)
-        current_time = (datetime.utcnow() - epoch).total_seconds()
+        """Write time info to Time Cluster.
 
-        time_zone = (
-            datetime.fromtimestamp(86400) - datetime.utcfromtimestamp(86400)
-        ).total_seconds()
+        It supports adjusting for daylight saving time, but this is not trivial to retrieve with the modules:
+            zoneinfo, datetime or time
+        """
+        epoch = datetime(2000, 1, 1, 0, 0, 0, 0, tzinfo=UTC)
+        current_time = (datetime.now(UTC) - epoch).total_seconds()
 
         await self.write_attributes(
             {
                 "time": current_time,
                 "time_status": 0b00000010,  # only bit 1 can be set
-                "time_zone": time_zone,
+                "time_zone": time.timezone
             }
         )
 
     async def bind(self):
         """According to the documentation of Zigbee2MQTT there is a bug in the Danfoss firmware with the time.
+
         It doesn't request it, so it has to be fed the correct time.
         """
         result = await super().bind()
-
         await self.write_time()
-
         return result
 
 

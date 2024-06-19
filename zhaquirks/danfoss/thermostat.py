@@ -28,6 +28,7 @@ Broken ZCL attributes:
     0x0204 - TemperatureDisplayMode (0x0000): Writing doesn't seem to do anything
 """
 from collections.abc import Callable
+from copy import copy
 from datetime import UTC, datetime
 import time
 from typing import Any
@@ -339,7 +340,7 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
             id=0x4052, type=types.int16s, access="rwp", is_manufacturer_specific=False
         )
 
-    SETPOINT_SCHEDULE = AttributeDefs.occupied_heating_setpoint_schedule
+    setpoint_schedule = AttributeDefs.occupied_heating_setpoint_schedule
 
 
     async def write_attributes(self, attributes, manufacturer=None):
@@ -365,10 +366,10 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
             attributes[occupied_heating_setpoint.name] = fast_setpoint_change
             attributes[system_mode.name] = system_mode.type.Heat
 
-        if self.SETPOINT_SCHEDULE.name in attributes:
+        if self.setpoint_schedule.name in attributes:
             # handle setpoint schedule
-            attributes[OCCUPIED_HEATING_SETPOINT.name] = attributes.pop(
-                self.SETPOINT_SCHEDULE.name
+            attributes[occupied_heating_setpoint.name] = attributes.pop(
+                self.setpoint_schedule.name
             )
 
         # Attributes cannot be empty, because write_res cannot be empty, but it can contain unrequested items
@@ -400,8 +401,8 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
     async def read_attributes_raw(self, attributes, manufacturer=None):
         """Handle setpoint schedule attribute."""
         try:
-            attributes.remove(self.SETPOINT_SCHEDULE.id)
-            attributes.append(OCCUPIED_HEATING_SETPOINT.id)
+            attributes.remove(self.setpoint_schedule.id)
+            attributes.append(occupied_heating_setpoint.id)
         except ValueError:  # if it doesn't exist: don't do anything
             pass
 
@@ -410,11 +411,11 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         )
 
         occupied_heating_setpoint_list = [
-            a for a in results[0] if a.attrid == OCCUPIED_HEATING_SETPOINT.id
+            a for a in results[0] if a.attrid == occupied_heating_setpoint.id
         ]
         if occupied_heating_setpoint_list:
             occupied_heating_setpoint_record = copy(occupied_heating_setpoint_list[0])
-            occupied_heating_setpoint_record.attrid = self.SETPOINT_SCHEDULE.id
+            occupied_heating_setpoint_record.attrid = self.setpoint_schedule.id
             results[0].append(occupied_heating_setpoint_record)
 
         return results

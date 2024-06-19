@@ -28,6 +28,7 @@ Broken ZCL attributes:
     0x0204 - TemperatureDisplayMode (0x0000): Writing doesn't seem to do anything
 """
 from collections.abc import Callable
+from copy import copy
 from datetime import UTC, datetime
 import time
 from typing import Any
@@ -335,6 +336,12 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         window_open_feature = ZCLAttributeDef(  # window_open_feature_on_off
             id=0x4051, type=types.Bool, access="rw", is_manufacturer_specific=True
         )  # non-configurable reporting
+        occupied_heating_setpoint_schedule = ZCLAttributeDef(
+            id=0x4052, type=types.int16s, access="rwp", is_manufacturer_specific=False
+        )
+
+    setpoint_schedule = AttributeDefs.occupied_heating_setpoint_schedule
+
 
     async def write_attributes(self, attributes, manufacturer=None):
         """There are 2 types of setpoint changes: Fast and Slow.
@@ -359,6 +366,12 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
             attributes[occupied_heating_setpoint.name] = fast_setpoint_change
             attributes[system_mode.name] = system_mode.type.Heat
 
+        if self.setpoint_schedule.name in attributes:
+            # handle setpoint schedule
+            attributes[occupied_heating_setpoint.name] = attributes.pop(
+                self.setpoint_schedule.name
+            )
+
         # Attributes cannot be empty, because write_res cannot be empty, but it can contain unrequested items
         write_res = await super().write_attributes(
             attributes, manufacturer=manufacturer
@@ -372,6 +385,8 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
                 manufacturer=manufacturer,
             )
 
+        # TODO: also return setpoint_schedule when returned by OCCUPIED_HEATING_SETPOINT is write_res
+
         return write_res
 
     async def bind(self):
@@ -382,6 +397,28 @@ class DanfossThermostatCluster(CustomizedStandardCluster, Thermostat):
         await self.endpoint.time.write_time()
 
         return await super().bind()
+
+    async def read_attributes_raw(self, attributes, manufacturer=None):
+        """Handle setpoint schedule attribute."""
+        try:
+            attributes.remove(self.setpoint_schedule.id)
+            attributes.append(occupied_heating_setpoint.id)
+        except ValueError:  # if it doesn't exist: don't do anything
+            pass
+
+        results = await super().read_attributes_raw(
+            attributes, manufacturer=manufacturer
+        )
+
+        occupied_heating_setpoint_list = [
+            a for a in results[0] if a.attrid == occupied_heating_setpoint.id
+        ]
+        if occupied_heating_setpoint_list:
+            occupied_heating_setpoint_record = copy(occupied_heating_setpoint_list[0])
+            occupied_heating_setpoint_record.attrid = self.setpoint_schedule.id
+            results[0].append(occupied_heating_setpoint_record)
+
+        return results
 
 
 class DanfossUserInterfaceCluster(CustomizedStandardCluster, UserInterface):
